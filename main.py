@@ -14,7 +14,7 @@ def plot_segmentation_pair(
     x_sample: np.ndarray,
     y_true: np.ndarray,
     y_pred: np.ndarray | None = None,
-    title: str = "Segmentation sample",
+    title: str = "Semantic segmentation sample",
     out_path: str | None = None,
 ) -> None:
     cmap = ListedColormap(["red", "lightgray", "blue"])
@@ -29,12 +29,12 @@ def plot_segmentation_pair(
     axes[0].set_ylabel("Time")
 
     axes[1].imshow(y_true, aspect="auto", cmap=cmap, norm=norm)
-    axes[1].set_title("True class map\n(0=soft, 1=neutral, 2=hard)")
+    axes[1].set_title("GT semantic mask\n(0=soft, 1=neutral, 2=hard)")
     axes[1].set_xlabel("Crossline")
 
     if y_pred is not None:
         axes[2].imshow(y_pred, aspect="auto", cmap=cmap, norm=norm)
-        axes[2].set_title("Predicted class map")
+        axes[2].set_title("Pred semantic mask")
         axes[2].set_xlabel("Crossline")
 
     fig.suptitle(title)
@@ -45,15 +45,15 @@ def plot_segmentation_pair(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="4D seismic hardening/softening segmentation")
+    parser = argparse.ArgumentParser(description="4D seismic hardening/softening semantic segmentation")
     parser.add_argument("--train-ip", default=os.getenv("TRAIN_IP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model01_dIP.csv"))
     parser.add_argument("--train-amp", default=os.getenv("TRAIN_AMP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model01_dAMP.csv"))
     parser.add_argument("--test-ip", default=os.getenv("TEST_IP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model77_dIP.csv"))
     parser.add_argument("--test-amp", default=os.getenv("TEST_AMP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model77_dAMP.csv"))
-    parser.add_argument("--architecture", choices=["unet", "fcn"], default="unet")
-    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--architecture", choices=["unet_deep", "segnet", "deeplab_lite"], default="unet_deep")
+    parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--sigma", type=float, default=0.5, help="Threshold scale for converting dAmp to classes")
+    parser.add_argument("--sigma", type=float, default=0.5, help="Threshold scale for converting dAmp to semantic classes")
     parser.add_argument("--sample-idx", type=int, default=0)
     parser.add_argument("--output-dir", default="artifacts")
     return parser.parse_args()
@@ -90,16 +90,18 @@ def main() -> None:
         sigma=training_config.segmentation_sigma,
     )
 
+    print(f"Prepared semantic segmentation tensors: X_train={dataset['X_train'].shape}, X_test={dataset['X_test'].shape}")
+
     metrics = train_and_evaluate(dataset, training_config)
     print("\n=== Final metrics ===")
     for key, value in metrics.items():
-        print(f"{key}: {value:.6f}")
+        print(f"{key}: {value}")
 
     idx = min(args.sample_idx, dataset["X_test"].shape[0] - 1)
     plot_segmentation_pair(
         x_sample=dataset["X_test"][idx],
         y_true=dataset["y_test_class_idx"][idx],
-        title=f"Model77 sample {idx} ground truth",
+        title=f"Model77 semantic segmentation sample {idx}",
         out_path=f"{args.output_dir}/sample_{idx}_truth.png",
     )
 
