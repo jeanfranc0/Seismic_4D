@@ -1,132 +1,110 @@
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
+import argparse
+import os
+
 import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.model_selection import train_test_split
-from matplotlib.colors import ListedColormap, BoundaryNorm
+import numpy as np
+from matplotlib.colors import BoundaryNorm, ListedColormap
+
+from src.model import DataConfig, TrainingConfig, preprocess_for_segmentation, train_and_evaluate
 
 
-def reshape_to_volumes(df_ip, df_amp):
-    """
-    Transforma el DataFrame plano en tensores 2D por cada Inline.
-    Resultado esperado: (N_inlines, N_samples_time, N_xlines)
-    """  
-    assert df_ip[['inline', 'xline', 'time']].equals(df_amp[['inline', 'xline', 'time']])
-    
-    # Identificamos las dimensiones únicas
-    inlines = sorted(df_ip['inline'].unique())
-    xlines = sorted(df_ip['xline'].unique())
-    times = sorted(df_ip['time'].unique())
-    
-    n_inlines = len(inlines)
-    n_xlines = len(xlines)
-    n_times = len(times)
-    
-    print(f"Dimensiones detectadas: {n_inlines} Inlines, {n_xlines} Xlines, {n_times} Samples de tiempo.")
+def plot_segmentation_pair(
+    x_sample: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray | None = None,
+    title: str = "Semantic segmentation sample",
+    out_path: str | None = None,
+) -> None:
+    cmap = ListedColormap(["red", "lightgray", "blue"])
+    norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], cmap.N)
 
-    # Creamos contenedores vacíos para los volúmenes
-    # Forma: (N_Inlines, Time, Xline) -> Similar a una imagen (N, Alto, Ancho)
-    X_vol = np.zeros((n_inlines, n_times, n_xlines))
-    y_vol = np.zeros((n_inlines, n_times, n_xlines))
+    ncols = 3 if y_pred is not None else 2
+    fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 5))
 
-    # Unimos los datos para asegurar correspondencia
-    df_combined = pd.merge(df_ip, df_amp, on=['inline', 'xline', 'time'])
+    axes[0].imshow(x_sample.squeeze(), aspect="auto", cmap="seismic")
+    axes[0].set_title("Input dIP")
+    axes[0].set_xlabel("Crossline")
+    axes[0].set_ylabel("Time")
 
-    # Llenamos los volúmenes
-    for i, idx_inline in enumerate(inlines):
-        # Extraemos la sección 2D
-        section = df_combined[df_combined['inline'] == idx_inline]
-        
-        # Pivotamos para organizar Tiempo en filas y Xline en columnas
-        X_slice = section.pivot(index='time', columns='xline', values=df_ip.columns[-1]).values
-        y_slice = section.pivot(index='time', columns='xline', values=df_amp.columns[-1]).values
-        
-        X_vol[i, :, :] = X_slice
-        y_vol[i, :, :] = y_slice
-    
-    return X_vol, y_vol
+    axes[1].imshow(y_true, aspect="auto", cmap=cmap, norm=norm)
+    axes[1].set_title("GT semantic mask\n(0=soft, 1=neutral, 2=hard)")
+    axes[1].set_xlabel("Crossline")
+
+    if y_pred is not None:
+        axes[2].imshow(y_pred, aspect="auto", cmap=cmap, norm=norm)
+        axes[2].set_title("Pred semantic mask")
+        axes[2].set_xlabel("Crossline")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+
+    if out_path:
+        fig.savefig(out_path, dpi=150)
 
 
-def preprocessing_shape(train_val_ip, train_val_amp, column_name_01, test_ip, test_amp, column_name_77):
-    # 1. Carga (Asumiendo que ya tienes los CSVs del paso anterior)
-    # Entrenamos con Model 001 [cite: 6, 25]
-    X_train_full, y_train_full = reshape_to_volumes(train_val_ip, train_val_amp, column_name_01)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="4D seismic hardening/softening semantic segmentation")
+    parser.add_argument("--train-ip", default=os.getenv("TRAIN_IP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model01_dIP.csv"))
+    parser.add_argument("--train-amp", default=os.getenv("TRAIN_AMP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model01_dAMP.csv"))
+    parser.add_argument("--test-ip", default=os.getenv("TEST_IP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model77_dIP.csv"))
+    parser.add_argument("--test-amp", default=os.getenv("TEST_AMP_PATH", "/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model77_dAMP.csv"))
+    parser.add_argument("--architecture", choices=["unet_deep", "segnet", "deeplab_lite"], default="unet_deep")
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--sigma", type=float, default=0.5, help="Threshold scale for converting dAmp to semantic classes")
+    parser.add_argument("--sample-idx", type=int, default=0)
+    parser.add_argument("--output-dir", default="artifacts")
+    return parser.parse_args()
 
-    # Testeamos con Model 077 [cite: 7, 26]
-    X_test, y_test = reshape_to_volumes(test_ip, test_amp, column_name_77)
 
-    # 2. Split de entrenamiento y validación conservando SECCIONES COMPLETAS
-    # Esto evita que el modelo vea partes de una imagen en entrenamiento y otras en validación
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_full, y_train_full, test_size=0.2, random_state=42
+def main() -> None:
+    args = parse_args()
+
+    data_config = DataConfig(
+        train_ip_path=args.train_ip,
+        train_amp_path=args.train_amp,
+        test_ip_path=args.test_ip,
+        test_amp_path=args.test_amp,
+    )
+    training_config = TrainingConfig(
+        architecture=args.architecture,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        segmentation_sigma=args.sigma,
+        output_dir=args.output_dir,
     )
 
-    print(f"\nForma final de X_train (N, H, W): {X_train.shape}")
-    print(f"\nForma final de X_val (N, H, W): {X_val.shape}")
-    print(f"\nForma final de X_test (N, H, W): {X_test.shape}")
-    print(f"\nForma final de y_train (N, H, W): {y_train.shape}")
-    print(f"\nForma final de y_val (N, H, W): {y_val.shape}")
-    print(f"\nForma final de y_test (N, H, W): {y_test.shape}")
+    from src.model import load_data
 
-    return X_train, y_train, X_val, y_val, X_test, y_test
+    train_ip_df, train_amp_df, test_ip_df, test_amp_df = load_data(data_config)
+    dataset = preprocess_for_segmentation(
+        train_ip_df,
+        train_amp_df,
+        test_ip_df,
+        test_amp_df,
+        train_col=data_config.train_value_col,
+        test_col=data_config.test_value_col,
+        val_split=training_config.val_split,
+        sigma=training_config.segmentation_sigma,
+    )
 
+    print(f"Prepared semantic segmentation tensors: X_train={dataset['X_train'].shape}, X_test={dataset['X_test'].shape}")
 
-def load_data():
-    # --- CARGA DE DATOS ---
-    # Nota: Cargamos Model01 para Train/Val y Model77 para Test
-    train_val_ip = pd.read_csv("/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model01_dIP.csv")
-    train_val_amp = pd.read_csv("/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model01_dAMP.csv")
+    metrics = train_and_evaluate(dataset, training_config)
+    print("\n=== Final metrics ===")
+    for key, value in metrics.items():
+        print(f"{key}: {value}")
 
-    test_ip = pd.read_csv("/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model77_dIP.csv")
-    test_amp = pd.read_csv("/home/users/jeanfranco.escobedo/jeanfranco_2025/Jeanfranco/data/raw_dfs/Model77_dAMP.csv")
+    idx = min(args.sample_idx, dataset["X_test"].shape[0] - 1)
+    plot_segmentation_pair(
+        x_sample=dataset["X_test"][idx],
+        y_true=dataset["y_test_class_idx"][idx],
+        title=f"Model77 semantic segmentation sample {idx}",
+        out_path=f"{args.output_dir}/sample_{idx}_truth.png",
+    )
 
-    return train_val_ip, train_val_amp, test_ip, test_amp
-
-
-def plot_seismic_slice_reshaped(X_data, value_col, sample_idx, title):
-    """
-    Visualizes a specific sample (N) from reshaped seismic data (N, H, W, C).
-    Values are visualized with Red (negative), White (zero), and Blue (positive).
-    
-    Parameters:
-    - X_data: 4D numpy array with shape (N, H, W, C)
-    - value_col: Column name for value to display (but not used here since input is reshaped data)
-    - sample_idx: Index of the sample to visualize (N value)
-    - title: Title for the plot
-    """
-    # Get the specific sample (N) from the data
-    sample_data = X_data[sample_idx, :, :]
-    
-    # Create the plot for the selected sample
-    plt.figure(figsize=(12, 6))
-    
-    # Normalize the data for visualization
-    norm = plt.Normalize(vmin=-np.std(sample_data)*3, vmax=np.std(sample_data)*3)
-    label_cmap = ListedColormap(["red", "white", "blue"])
-
-    # Display the image (seismic slice)
-    plt.imshow(sample_data, aspect='auto', cmap=label_cmap, norm=norm,
-               extent=[0, sample_data.shape[1], sample_data.shape[0], 0])
-
-    plt.colorbar(label=value_col)
-    plt.title(f"{title} - Sample: {sample_idx}")
-    plt.xlabel("Crossline (W)")
-    plt.ylabel("Time (H)")
-    plt.savefig(title)
-    plt.show()
-
-
-def main():
-    # --- CARGA DE DATOS ---
-    train_val_ip, train_val_amp, test_ip, test_amp = load_data()
-
-    # --- PROCESAMIENTO ---
-    X_train, y_train, X_val, y_val, X_test, y_test = preprocessing_shape(train_val_ip, train_val_amp, "Model01", test_ip, test_amp, "Model77")
-    
-    # --- VISUALIZACIÓN DE UNA SECCIÓN SÍSMICA ---
-    sample_idx = 10  # Choose the sample index you want to visualize
-    plot_seismic_slice_reshaped(X_train, 'dIP', sample_idx, "Actual Seismic Slice X_train" + str(sample_idx))
-    plot_seismic_slice_reshaped(y_train, 'dIP', sample_idx, "Actual Seismic Slice y_train" + str(sample_idx))
 
 if __name__ == "__main__":
     main()
