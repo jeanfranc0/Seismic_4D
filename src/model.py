@@ -224,6 +224,18 @@ def conv_block(x: tf.Tensor, filters: int, kernel_size: int = 3, dropout: float 
     return x
 
 
+def resize_like(source: tf.Tensor, reference: tf.Tensor, name: str) -> tf.Tensor:
+    """Resize a decoder tensor to the spatial size of a reference tensor."""
+    return tf.keras.layers.Lambda(
+        lambda tensors: tf.image.resize(tensors[0], size=tf.shape(tensors[1])[1:3], method="bilinear"),
+        name=name,
+    )([source, reference])
+
+
+def resize_to_shape(source: tf.Tensor, target_shape: Tuple[int, int], name: str) -> tf.Tensor:
+    return tf.keras.layers.Resizing(target_shape[0], target_shape[1], interpolation="bilinear", name=name)(source)
+
+
 def build_unet_deep(input_shape: Tuple[int, int, int], num_classes: int = NUM_CLASSES) -> tf.keras.Model:
     inputs = tf.keras.Input(shape=input_shape)
 
@@ -242,22 +254,27 @@ def build_unet_deep(input_shape: Tuple[int, int, int], num_classes: int = NUM_CL
     b = conv_block(p4, 512, dropout=0.3)
 
     u4 = tf.keras.layers.UpSampling2D()(b)
+    u4 = resize_like(u4, c4, name="unet_resize_u4")
     u4 = tf.keras.layers.Concatenate()([u4, c4])
     c5 = conv_block(u4, 256)
 
     u3 = tf.keras.layers.UpSampling2D()(c5)
+    u3 = resize_like(u3, c3, name="unet_resize_u3")
     u3 = tf.keras.layers.Concatenate()([u3, c3])
     c6 = conv_block(u3, 128)
 
     u2 = tf.keras.layers.UpSampling2D()(c6)
+    u2 = resize_like(u2, c2, name="unet_resize_u2")
     u2 = tf.keras.layers.Concatenate()([u2, c2])
     c7 = conv_block(u2, 64)
 
     u1 = tf.keras.layers.UpSampling2D()(c7)
+    u1 = resize_like(u1, c1, name="unet_resize_u1")
     u1 = tf.keras.layers.Concatenate()([u1, c1])
     c8 = conv_block(u1, 32)
 
     outputs = tf.keras.layers.Conv2D(num_classes, 1, activation="softmax")(c8)
+    outputs = resize_to_shape(outputs, input_shape[:2], name="unet_output_resize")
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="seismic_unet_deep")
 
 
@@ -274,15 +291,20 @@ def build_segnet(input_shape: Tuple[int, int, int], num_classes: int = NUM_CLASS
     p4 = tf.keras.layers.MaxPool2D()(e4)
 
     d4 = tf.keras.layers.UpSampling2D()(p4)
+    d4 = resize_like(d4, e4, name="segnet_resize_d4")
     d4 = conv_block(d4, 256)
     d3 = tf.keras.layers.UpSampling2D()(d4)
+    d3 = resize_like(d3, e3, name="segnet_resize_d3")
     d3 = conv_block(d3, 128)
     d2 = tf.keras.layers.UpSampling2D()(d3)
+    d2 = resize_like(d2, e2, name="segnet_resize_d2")
     d2 = conv_block(d2, 64)
     d1 = tf.keras.layers.UpSampling2D()(d2)
+    d1 = resize_like(d1, e1, name="segnet_resize_d1")
     d1 = conv_block(d1, 32)
 
     outputs = tf.keras.layers.Conv2D(num_classes, 1, activation="softmax")(d1)
+    outputs = resize_to_shape(outputs, input_shape[:2], name="segnet_output_resize")
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="seismic_segnet")
 
 
@@ -308,11 +330,13 @@ def build_deeplab_lite(input_shape: Tuple[int, int, int], num_classes: int = NUM
 
     x = aspp_block(x, 128)
     x = tf.keras.layers.UpSampling2D(size=(4, 4))(x)
+    x = resize_like(x, low_level, name="deeplab_resize_decoder")
 
     low = tf.keras.layers.Conv2D(48, 1, padding="same", activation="relu")(low_level)
     x = tf.keras.layers.Concatenate()([x, low])
     x = conv_block(x, 64)
     outputs = tf.keras.layers.Conv2D(num_classes, 1, activation="softmax")(x)
+    outputs = resize_to_shape(outputs, input_shape[:2], name="deeplab_output_resize")
 
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="seismic_deeplab_lite")
 
