@@ -58,6 +58,48 @@ def _validate_alignment(df_ip: pd.DataFrame, df_amp: pd.DataFrame) -> None:
         raise ValueError("Input and target dataframes are not aligned on inline/xline/time.")
 
 
+def _resolve_signal_column(df: pd.DataFrame, model_tag: str, signal_hint: str) -> str:
+    """Resolve seismic value column from flexible naming patterns.
+
+    Examples supported:
+    - Model01_dIP / Model01_dAMP
+    - Model01_ip / Model01_amp
+    - direct full column name passed as model_tag
+    """
+    key_cols = {"inline", "xline", "time"}
+    value_cols = [col for col in df.columns if col not in key_cols]
+    signal_hint = signal_hint.lower()
+    model_tag_lower = model_tag.lower()
+
+    if model_tag in df.columns:
+        return model_tag
+
+    preferred_patterns = [
+        f"{model_tag}_d{signal_hint}",
+        f"{model_tag}_{signal_hint}",
+    ]
+    for pattern in preferred_patterns:
+        if pattern in df.columns:
+            return pattern
+
+    filtered = [
+        col
+        for col in value_cols
+        if model_tag_lower in col.lower() and signal_hint in col.lower()
+    ]
+    if len(filtered) == 1:
+        return filtered[0]
+
+    if len(value_cols) == 1:
+        return value_cols[0]
+
+    raise KeyError(
+        "Could not resolve signal column for "
+        f"model tag '{model_tag}' and signal '{signal_hint}'. "
+        f"Available value columns: {value_cols}"
+    )
+
+
 def reshape_to_volumes(
     df_ip: pd.DataFrame,
     df_amp: pd.DataFrame,
@@ -74,20 +116,15 @@ def reshape_to_volumes(
     x_volume = np.zeros((n_inlines, n_times, n_xlines), dtype=np.float32)
     y_volume = np.zeros((n_inlines, n_times, n_xlines), dtype=np.float32)
 
-    merged = pd.merge(df_ip, df_amp, on=["inline", "xline", "time"], suffixes=("_ip", "_amp"))
-    ip_col = f"{value_col}_ip"
-    amp_col = f"{value_col}_amp"
-
-    if ip_col not in merged.columns or amp_col not in merged.columns:
-        raise KeyError(
-            f"Expected columns '{ip_col}' and '{amp_col}' after merge. "
-            f"Available columns: {merged.columns.tolist()}"
-        )
+    ip_col = _resolve_signal_column(df_ip, model_tag=value_col, signal_hint="ip")
+    amp_col = _resolve_signal_column(df_amp, model_tag=value_col, signal_hint="amp")
 
     for i, inline_id in enumerate(inlines):
-        section = merged[merged["inline"] == inline_id]
-        x_volume[i] = section.pivot(index="time", columns="xline", values=ip_col).values
-        y_volume[i] = section.pivot(index="time", columns="xline", values=amp_col).values
+        section_ip = df_ip[df_ip["inline"] == inline_id]
+        section_amp = df_amp[df_amp["inline"] == inline_id]
+
+        x_volume[i] = section_ip.pivot(index="time", columns="xline", values=ip_col).values
+        y_volume[i] = section_amp.pivot(index="time", columns="xline", values=amp_col).values
 
     return x_volume, y_volume
 
